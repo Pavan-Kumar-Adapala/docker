@@ -1,0 +1,100 @@
+Ubuntu - Machine
+#################
+
+Configure remote access for Docker daemon - without TLS certificates
+---------------------------------------------------------------------
+
+Client: my laptop
+Docker Host (contain docker daemon): AWS EC2
+
+step 0: AWS
+
+	1. launch ec2 instance (Ubuntu)
+		- security groups
+			- allow SSH 22 - my Ip
+			- allow custom TCP 2376 - my IP
+			- for nginx container: allow http 80 my Ip
+	2. install docker (Ubuntu)
+		- sudo apt-get update
+		- sudo apt-get install docker.io -y
+		- sudo systemctl start docker
+		- sudo systemctl status docker
+		- sudo systemctl enable docker # To start the Docker service automatically when the instance starts.
+		- sudo usermod -a -G docker $(whoami) # if we are not added user to docker group, then we need to use "sudo" example: "sudo docker run"
+		- newgrp docker # apply the above user group changes 
+
+step 1: docker configuration file (ec2)
+
+	docker default configuration file location: /usr/lib/systemd/system/docker.service
+
+	Override file location: /etc/systemd/system/docker.service.d/override.conf 
+
+		Type 1: sudo systemctl edit docker.service --> this automatically creates "/etc/systemd/system/docker.service.d/override.conf" file
+			enter the below lines
+				[Service]
+				ExecStart=
+				ExecStart=/usr/bin/dockerd -H fd:// -H tcp://<aws-ec2-private-ip>:2376 --containerd=/run/containerd/containerd.sock 
+
+		Type 2: 
+			sudo mkdir -p /etc/systemd/system/docker.service.d
+			sudo nano /etc/systemd/system/docker.service.d/override.conf
+			enter the below lines
+				[Service]
+				ExecStart=
+				ExecStart=/usr/bin/dockerd -H fd:// -H tcp://<aws-ec2-private-ip>:2376 --containerd=/run/containerd/containerd.sock 
+		
+		Note: 
+			- aws-ec2-private-ip not change even the instance is restarted. 
+			- I also tried using the public ip in the "override.conf" file and I faced an issue while running "sudo systemctl restart docker" command
+
+
+step 2: Reload the systemd configuration and restart Docker:
+
+	sudo systemctl daemon-reload
+	sudo systemctl restart docker
+
+step 3: Verify the Network Configuration
+
+	ip a | grep <aws-ec2-private-ip> # make sure is IP is valid IP address configured on the server and that port 2376 is not already in use
+	sudo netstat -tuln | grep 2376
+	
+	(or)
+
+	sudo netstat -lntp | grep dockerd
+
+
+step 4: Connect Docker CLI on Windows to the AWS EC2 Docker Host & Verify the Connection: (my laptop)
+
+	In laptop - open powershell:
+		set DOCKER_HOST=tcp://<your-ec2-public-ip>:2376
+		docker version 
+		docker run -d nginx
+	
+	(or)
+
+	docker -H <your-aws-public-ip:2376> run -d nginx
+	
+	docker -H 3.71.35.109:2375 container ls
+
+
+
+
+Linux - machine:
+################
+
+Configure remote access for Docker daemon - without TLS certificates
+---------------------------------------------------------------------
+
+Client: my laptop
+Docker Host (contain docker daemon): AWS EC2
+
+only change in step 1:
+
+	[Service]
+	ExecStart=
+	ExecStart=/usr/bin/dockerd -H fd:// -H tcp://<aws-ec2-private-ip>:2376 --containerd=/run/containerd/containerd.sock $OPTIONS $DOCKER_STORAGE_OPTIONS $DOCKER_ADD_RUNTIMES
+
+
+Note:
+- you can use any port like 2375, but add in ec2 security group inbound list
+
