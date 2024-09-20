@@ -1,3 +1,9 @@
+By default, Docker runs through a non-networked UNIX socket. It can also optionally communicate using SSH or a TLS (HTTPS) socket.
+
+-------------------------------------------------------------------- TCP protocol - without and with TLS --------------------------------------------------------------------------------
+TCP:
+++++
+
 Ubuntu - Machine
 #################
 
@@ -74,7 +80,7 @@ step 4: Connect Docker CLI on Windows to the AWS EC2 Docker Host & Verify the Co
 
 	docker -H <your-aws-public-ip:2376> run -d nginx
 	
-	docker -H 3.71.35.109:2375 container ls
+	docker -H <your-aws-public-ip:2376> container ls
 
 
 
@@ -97,4 +103,246 @@ only change in step 1:
 
 Note:
 - you can use any port like 2375, but add in ec2 security group inbound list
+
+
+
+TCP: With TLS Certificates:
++++++++++++++++++++++++++++
+	Overview
+		1. Generate TLS certificates on the Docker host (AWS EC2).
+		2. Configure the Docker daemon to use these certificates and allow remote access.
+		3. Open port 2376 in the EC2 security group.
+		4. Transfer client certificates to your Windows laptop.
+		5. Configure the Docker client on Windows to connect to the remote Docker daemon using the certificates.
+
+		Step 1: Generate TLS Certificates on the Docker Host (AWS EC2)
+
+			To securely connect to the Docker daemon remotely, you need to generate TLS certificates. This setup involves creating:
+				a. Certificate Authority (CA) certificate.
+				b. server certificate for the Docker daemon.
+				c. client certificate for the Docker client (Windows laptop).
+
+			1. Install OpenSSL (if not already installed):
+				
+				On Ubuntu Machine:
+					sudo apt-get update
+					sudo apt-get install -y openssl
+
+			2. Create a directory for the certificates:
+
+				mkdir -p ~/docker-certs
+				cd ~/docker-certs
+
+			3. Generate a Certificate Authority (CA): The CA certificate is used to sign the server and client certificates.
+
+				openssl genrsa -aes256 -out ca-key.pem 4096  # CA private key note: enter atleast 4 digits
+				openssl req -new -x509 -days 365 -key ca-key.pem -sha256 -out ca.pem
+
+			4. Create a Server Certificate and Key for Docker Daemon:
+				Generate a private key for the server:
+					openssl genrsa -out server-key.pem 4096
+
+				Create a Certificate Signing Request (CSR) for the server:
+					openssl req -subj "/CN=<your-ec2-public-ip>" -new -key server-key.pem -out server.csr
+		
+					note: Replace <your-ec2-public-ip> with the public IP address of your EC2 instance.
+
+				Create an extfile for the server certificate:
+					echo "subjectAltName = IP:<your-ec2-public-ip>,IP:127.0.0.1" > extfile.cnf
+					echo "extendedKeyUsage = serverAuth" >> extfile.cnf
+
+				Generate the server certificate:
+					openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out server-cert.pem -extfile extfile.cnf
+
+			5. Create a Client Certificate for Your Laptop:
+				Generate a private key for the client:
+					openssl genrsa -out key.pem 4096
+
+				Create a CSR for the client:
+					openssl req -subj '/CN=client' -new -key key.pem -out client.csr
+
+				Create an extfile for the client certificate:
+					echo "extendedKeyUsage = clientAuth" > extfile-client.cnf
+
+				Generate the client certificate:
+					openssl x509 -req -days 365 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out cert.pem -extfile extfile-client.cnf
+
+
+			6. After generating cert.pem and server-cert.pem you can safely remove the two certificate signing requests and extensions config files:
+
+ 				rm -v client.csr server.csr extfile.cnf extfile-client.cnf
+
+			7.  Set the Correct Permissions on the Certificates:
+
+				- To protect your keys from accidental damage, remove their write permissions. To make them only readable by you, change file modes as follows:
+					chmod 0400 ca-key.pem key.pem server-key.pem
+					chmod 0444 ca.pem server-cert.pem cert.pem
+
+					or
+
+					chmod -v 0400 ca-key.pem key.pem server-key.pem
+					chmod -v 0444 ca.pem server-cert.pem cert.pem
+
+			8. Copy the Server Certificates to Docker's Directory:
+
+				sudo mkdir -p /etc/docker/certs
+				sudo cp ca.pem server-cert.pem server-key.pem /etc/docker/certs/
+
+		Step 2: Configure the Docker Daemon for Remote Access
+			- You need to configure the Docker daemon to use the generated certificates and bind to the public IP.
+
+			1. Edit Docker's systemd service file:
+				Create or edit /etc/systemd/system/docker.service.d/override.conf:
+					sudo mkdir -p /etc/systemd/system/docker.service.d
+					sudo nano /etc/systemd/system/docker.service.d/override.conf
+
+					Add the following content to the override.conf file:
+						[Service]
+						ExecStart=
+						ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2376 --tlsverify 
+													--tlscacert=/etc/docker/certs/ca.pem 
+													--tlscert=/etc/docker/certs/server-cert.pem 
+													--tlskey=/etc/docker/certs/server-key.pem      # in a single line
+
+						note: 
+						- -H tcp://0.0.0.0:2376 makes Docker listen on all network interfaces. You could specify a specific IP address instead of 0.0.0.0 for more control.
+
+
+			2. Reload the systemd configuration and restart Docker:
+				sudo systemctl daemon-reload
+				sudo systemctl restart docker
+
+		Step 3: Open Port 2376 in Your AWS Security Group
+
+		Step 4: Transfer Client Certificates to Your Windows Laptop
+			- Copy the ca.pem, cert.pem, and key.pem files from your EC2 instance (~/docker-certs/) to your Windows laptop using a secure method (e.g., scp, WinSCP, or similar).
+
+			- Place them in a directory on your laptop, e.g., C:\Users\<YourUsername>\docker-certs.
+
+			example: scp -i ec2key.pem ec2-user@<your-ec2-public-ip>:~/docker-certs/{ca,cert,key}.pem C:/Users/pavan/docker_certs
+
+
+			test: docker --tlsverify --tlscacert=./docker_certs/ca.pem --tlscert=./docker_certs/cert.pem --tlskey=./docker_certs/key.pem -H=18.184.148.101:2376 info
+
+
+		Step 5: Configure Docker Client on Your Windows Laptop
+
+			Type 1: (for single section: testing)
+
+				1. Open Command Prompt or PowerShell on your Windows laptop.
+
+				2. Set the environment variables to use the remote Docker host:
+
+					set DOCKER_HOST=tcp://<your-ec2-public-ip>:2376
+					set DOCKER_TLS_VERIFY=1
+					set DOCKER_CERT_PATH=C:\Users\<YourUsername>\docker-certs
+
+				Note:
+				- Replace <your-ec2-public-ip> with the public IP of your EC2 instance.
+				- Replace <YourUsername> with your actual Windows username.
+
+				3. Test the Remote Docker Connection:
+
+					docker info
+
+			Type 2: Persisting Environment Variables
+
+				1. Create a .docker directory on your laptop if it doesn’t already exist:
+
+					mkdir %USERPROFILE%\.docker
+
+				2. Move the client certificates (ca.pem, cert.pem, key.pem) to this directory.
+
+				3. Create or edit a Docker configuration file:
+
+					Create a file named config.json in %USERPROFILE%\.docker and add the following:
+	
+						{
+						  "tlsverify": true,
+						  "tlscacert": "%USERPROFILE%\\.docker\\ca.pem",
+						  "tlscert": "%USERPROFILE%\\.docker\\cert.pem",
+                                                  "tlskey": "%USERPROFILE%\\.docker\\key.pem",
+  						  "hosts": ["tcp://<your-ec2-public-ip>:2376"]
+						}
+
+				4. docker info
+
+
+-------------------------------------------------------------------- END: TCP protocol - without and with TLS ------------------------------------------------------------------------------
+
+
+---------------------------------------------------------------------------------- SSH protocol --------------------------------------------------------------------------------------------
+SSH: (Secure way)
+++++++++++++++++++
+
+	First install docker on ec2 instance and allow SSH port
+
+	
+	OPEN CMD in LAPTOP run the below commands:
+	The following example creates a "docker context" to connect with a remote "dockerd" daemon on "<ec2-public-ip>" using SSH, and as the "ec2-user" user on the remote machine.
+
+	command 1: 
+
+	docker context create --docker host=ssh://ec2-user@<ec2-public-ip> --description="Remote engine" my-remote-engine
+	or
+	docker context create --docker "host=ssh://ec2-user@ec2-3-68-187-98.eu-central-1.compute.amazonaws.com" --description="Remote engine" my-remote-engine
+
+		message: Successfully created context "my-remote-engine"
+
+	command 2:
+
+	docker context use my-remote-engine
+
+		message: Current context is now "my-remote-engine"
+
+	command 3:
+
+	docker info
+
+		error message:
+			while using ec2 public ip or DNS: stderr=ec2-user@<ec2-public-ip>: Permission denied (publickey,gssapi-keyex,gssapi-with-mic)
+
+	docker context create --docker host=ssh://ec2-user@<ec2-private-ip> --description="Remote engine" my-remote-engine
+
+		error message: 
+			while using ec2 private ip: stderr=banner exchange: Connection to UNKNOWN port -1: Connection refused
+
+ 
+	To resolve above issue: 
+	-----------------------
+		
+		go to file location IN LAPTOP: C:/Users/pavan/.ssh/config
+
+			add below details: (to specify the SSH key for the remote host)
+
+			# AWS EC2 instance remote docker configuration using "docker context"
+			Host <aws-ec2-public-ip>
+    				User ec2-user # if Ubuntu 
+    				IdentityFile <full-path-of ec2-instance-pem-key>.pem
+    				StrictHostKeyChecking no
+
+		OPEN CMD in LAPTOP
+		
+			- run the command 1 to 3 one by one.
+			
+			note: I also checked using "aws-ec2-private-ip", but I got same error message "Connection to UNKNOWN port -1: Connection refused" mentioned earlier
+
+		Testing: CMD in LAPTOP
+ 			- First check the current host using command "docker context show" 
+			- docker run nginx # login to ec2 instance and check running containers (docker ps -q)
+
+
+	Hints: 
+		- To know more commands just type "docker context" in CMD and it provides list 
+		- switch back to default host: "docker context use default"
+ 
+
+ 
+
+
+
+
+
+		
+		
 
