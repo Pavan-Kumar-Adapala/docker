@@ -43,6 +43,8 @@ https://docs.docker.com/engine/daemon/remote-access/
 
 ---
 
+wsl --list --online
+
 ## Installing WSL and Linux Distributions
 
 Refer to Microsoft’s official install guide:
